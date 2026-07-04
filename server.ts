@@ -205,6 +205,22 @@ app.post("/api/extract-fact", requireUser, async (req, res) => {
   }
 });
 
+// テキストを「意味のベクトル(embedding)」に変換する窓口（意味検索・pgvector用）
+// キーはサーバーだけが持つので、埋め込み計算もここを通す
+app.post("/api/embed", requireUser, async (req, res) => {
+  const { text } = req.body;
+  try {
+    const r = await openai.embeddings.create({
+      model: "text-embedding-3-small",          // 1536次元。Supabaseの vector(1536) と合わせる
+      input: (text ?? "").slice(0, 8000),
+    });
+    res.json({ embedding: r.data[0].embedding });
+  } catch (err) {
+    console.error("embedに失敗:", err);
+    res.status(500).json({ error: "embedに失敗しました" });
+  }
+});
+
 // ローカルは3000、本番（Renderなど）はプラットフォームが渡すPORTを使う
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log("起動 → port " + PORT));
