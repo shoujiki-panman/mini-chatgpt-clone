@@ -10,7 +10,7 @@
 TypeScript + Express + OpenAI + Supabase で、本物と同じ構造のチャットを実装しています。
 
 ▼ コード（GitHub）
-（リポジトリURLをここに）
+https://github.com/shoujiki-panman/mini-chatgpt-clone
 
 ▼ できること
 サーバー経由でLLMと会話 / 会話が続く（履歴を毎回送り直す） / Googleログイン＋会話をDB保存(RLS) /
