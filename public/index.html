@@ -1,0 +1,264 @@
+<!-- public/index.html — 席の注文画面。ここに自分の手で書いていく。 -->
+<!-- 迷ったら答え合わせ: public/index.reference.html -->
+<!doctype html>
+<html lang="ja">
+  <body>
+    <button id="login">Googleでログイン</button>
+    <button id="newchat">新しい会話</button>
+    <span id="who"></span>
+    <div id="tokens" style="color:#888; font-size:0.85em; margin:4px 0"></div>
+    <div id="log"></div>
+    <input id="msg" placeholder="メッセージを入力" />
+    <button id="send">送信</button>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <script>
+      const SUPABASE_URL = "https://kogxknhdvgencyyntbru.supabase.co";
+      const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImtvZ3hrbmhkdmdlbmN5eW50YnJ1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODI0OTg0MTMsImV4cCI6MjA5ODA3NDQxM30.JlF0E1uOKF9SEepvCNv1dXqUfw9U41jgmZl6xBNk4NE";
+      const db = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+      const sendButton = document.getElementById("send");
+      const input = document.getElementById("msg");
+      const log = document.getElementById("log");
+
+      const BASE_SYSTEM = "あなたは親切で、やさしい日本語で答えるアシスタントです。";
+      const history = [{ role: "system", content: BASE_SYSTEM }];
+
+      // 第9章：要約＋直近N件だけをLLMに渡す
+      const RECENT_COUNT = 4;   // 直近で何件そのまま渡すか（今日はデモ用に少なめ）
+      let summary = "";         // これまでの会話の要約（DBにも保存する）
+      let summarizedCount = 0;  // 要約に畳み込み済みの「古い発言」の数
+
+      // 第10章：会話をまたいで覚える「メモリ」（ユーザーの事実）
+      let userId = null;
+      let memoryFacts = [];
+
+      const tokensSpan = document.getElementById("tokens");
+
+      // 文字数からトークン数を"ざっくり"見積もる（あくまで目安）
+      const CHARS_PER_TOKEN = 2; // 日本語まじりは多めに食うので小さめに見積もる
+      const estimateTokens = (text) => Math.ceil(text.length / CHARS_PER_TOKEN);
+
+      // system（最初の指示）に、メモリ（ユーザーの事実）をそっと差し込む
+      function buildSystem() {
+        let content = BASE_SYSTEM;
+        if (memoryFacts.length) {
+          content += "\n【ユーザーについて】\n" + memoryFacts.map((f) => "- " + f).join("\n");
+        }
+        return { role: "system", content };
+      }
+
+      // LLMに実際に渡すもの＝「設定(＋メモリ)＋これまでの要約＋直近N件」だけ
+      function buildMessagesForLLM() {
+        const rest = history.slice(1);
+        const recent = rest.slice(-RECENT_COUNT);
+        const msgs = [buildSystem()];
+        if (summary) msgs.push({ role: "system", content: "これまでの会話の要約:\n" + summary });
+        msgs.push(...recent);
+        return msgs;
+      }
+
+      function sumTokens(msgs) {
+        let sum = 0;
+        for (const m of msgs) sum += estimateTokens(m.content);
+        return sum;
+      }
+
+      function render() {
+        log.textContent = "";
+        for (const m of history) {
+          if (m.role === "system") continue;
+          const line = document.createElement("p");
+          line.textContent = (m.role === "user" ? "あなた: " : "AI: ") + m.content;
+          log.appendChild(line);
+        }
+        tokensSpan.textContent =
+          "LLMに送るサイズ: 約" + sumTokens(buildMessagesForLLM()) + "トークン" +
+          "（全文なら約" + sumTokens(history) + "／要約に畳んだ発言: " + summarizedCount +
+          "件／覚えている事実: " + memoryFacts.length + "件）";
+      }
+
+      let isSending = false;
+
+      async function send(text) {
+        if (isSending) return; // 送信中なら、なにもしない（二重送信ブロック）
+        isSending = true;
+        sendButton.disabled = true;
+        try {
+          history.push({ role: "user", content: text });
+          render();
+          const { data: sessionData } = await db.auth.getSession();
+          const token = sessionData.session?.access_token;
+          const res = await fetch("/api/chat", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: "Bearer " + token,
+            },
+            body: JSON.stringify({ messages: buildMessagesForLLM() }), // ← 要約＋直近＋メモリだけ
+          });
+          if (!res.ok) {
+            const err = await res.json();
+            history.push({ role: "assistant", content: "⚠ " + (err.error || "エラー") });
+            render();
+            return;
+          }
+          // SSEで届く断片を、assistantメッセージに足していく（1文字ずつ表示）
+          history.push({ role: "assistant", content: "" });
+          const assistantMsg = history[history.length - 1];
+          const reader = res.body.getReader();
+          const decoder = new TextDecoder();
+          let buffer = "";
+          while (true) {
+            const { value, done } = await reader.read(); // 次の断片を待つ
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split("\n");
+            buffer = lines.pop(); // 最後の未完成な行は次回に持ち越す
+            for (const line of lines) {
+              if (!line.startsWith("data: ")) continue;
+              const payload = line.slice(6);
+              if (payload === "[DONE]") continue;
+              if (payload === "[ERROR]") { assistantMsg.content += "（エラー）"; continue; }
+              assistantMsg.content += JSON.parse(payload); // ★届いた断片を足す
+              render();
+            }
+          }
+          if (conversationId) {
+            await db.from("messages").insert([
+              { conversation_id: conversationId, role: "user", content: text },
+              { conversation_id: conversationId, role: "assistant", content: assistantMsg.content },
+            ]);
+          }
+          await maybeSummarize();         // 古い発言を要約に畳み込む（第9章）
+          await extractAndSaveFact(text); // 覚えるべき事実を抜き出して保存（第10章）
+        } finally {
+          isSending = false; // 成功でも失敗でも必ず解除
+          sendButton.disabled = false;
+        }
+      }
+
+      // 直近N件から押し出された古い発言だけを、前回の要約に足してまとめ直す（差分要約）
+      async function maybeSummarize() {
+        const rest = history.slice(1);
+        const overflowCount = rest.length - RECENT_COUNT;
+        if (overflowCount <= summarizedCount) return;
+        const overflowed = rest.slice(summarizedCount, overflowCount);
+        const overflowedText = overflowed
+          .map((m) => (m.role === "user" ? "あなた: " : "AI: ") + m.content)
+          .join("\n");
+        const { data: sessionData } = await db.auth.getSession();
+        const token = sessionData.session?.access_token;
+        const res = await fetch("/api/summarize", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: "Bearer " + token },
+          body: JSON.stringify({ oldSummary: summary, overflowed: overflowedText }),
+        });
+        if (!res.ok) return;
+        const data = await res.json();
+        summary = data.summary;
+        summarizedCount = overflowCount;
+        if (conversationId) {
+          await db.from("conversations").update({ summary }).eq("id", conversationId);
+        }
+        render();
+      }
+
+      // 発言から「長く覚えるべき事実」を抜き出し、あればメモリに保存（会話をまたいで残る）
+      async function extractAndSaveFact(text) {
+        const { data: sessionData } = await db.auth.getSession();
+        const token = sessionData.session?.access_token;
+        const res = await fetch("/api/extract-fact", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: "Bearer " + token },
+          body: JSON.stringify({ text }),
+        });
+        if (!res.ok) return;
+        const { fact } = await res.json();
+        if (fact) {
+          await db.from("memories").insert({ fact }); // user_id は default auth.uid() が入れる
+          memoryFacts.push(fact);
+          render();
+        }
+      }
+
+      const loginButton = document.getElementById("login");
+      const newChatButton = document.getElementById("newchat");
+      const who = document.getElementById("who");
+
+      loginButton.addEventListener("click", async () => {
+        await db.auth.signInWithOAuth({
+          provider: "google",
+          options: { redirectTo: "http://localhost:3000" },
+        });
+      });
+
+      // 新しい会話を始める（履歴・要約はまっさらに。でもメモリ＝事実は残る）
+      newChatButton.addEventListener("click", async () => {
+        if (!userId) return;
+        const { data: created } = await db
+          .from("conversations")
+          .insert({ user_id: userId, title: "新しい会話" })
+          .select("id, summary")
+          .single();
+        conversationId = created.id;
+        summary = created.summary || "";
+        summarizedCount = 0;
+        history.length = 1; // system だけ残して会話をクリア
+        render();
+      });
+
+      let conversationId = null;
+
+      async function getOrCreateConversation(uid) {
+        const { data: rows } = await db
+          .from("conversations")
+          .select("id, summary")
+          .order("created_at", { ascending: false })
+          .limit(1);
+        if (rows && rows.length > 0) return rows[0];
+        const { data: created } = await db
+          .from("conversations")
+          .insert({ user_id: uid, title: "新しい会話" })
+          .select("id, summary")
+          .single();
+        return created;
+      }
+
+      async function loadMessages(convId) {
+        const { data: rows } = await db
+          .from("messages")
+          .select("role, content")
+          .eq("conversation_id", convId)
+          .order("created_at", { ascending: true });
+        return rows || [];
+      }
+
+      async function init() {
+        const { data } = await db.auth.getSession();
+        if (!data.session) { who.textContent = "未ログイン"; return; }
+        userId = data.session.user.id;
+        who.textContent = "ログイン中: " + data.session.user.email;
+
+        // 自分のメモリ（事実）を読む＝会話をまたいで覚えている中身
+        const { data: mem } = await db.from("memories").select("fact");
+        memoryFacts = (mem || []).map((m) => m.fact);
+
+        const conv = await getOrCreateConversation(userId);
+        conversationId = conv.id;
+        summary = conv.summary || "";
+        const rows = await loadMessages(conversationId);
+        history.length = 1;
+        for (const r of rows) history.push({ role: r.role, content: r.content });
+        summarizedCount = 0;
+        render();
+      }
+      init();
+
+      sendButton.addEventListener("click", () => {
+        const text = input.value;
+        input.value = "";
+        send(text);
+      });
+    </script>
+  </body>
+</html>

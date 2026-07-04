@@ -1,0 +1,14 @@
+# 秘密の鍵（財布）— 絶対にgitに載せない
+.env
+
+# Node
+node_modules/
+
+# 教材本文（Singularity Societyの著作物。公開リポに載せない）
+materials/
+
+# 別リポ（クローン済み。ここには含めない）
+stretch-nanogpt/
+
+# 一時ファイル
+/tmp/
