@@ -6,6 +6,25 @@ import { createClient } from "@supabase/supabase-js";
 
 const app = express();
 app.use(express.json());
+
+// 別オリジン（Twitterクローン等）から呼べるように、必要なオリジンだけ許可（*にはしない）
+const ALLOWED_ORIGINS = [
+  "http://localhost:3000",
+  "http://localhost:8000",
+  "http://127.0.0.1:8000",
+  "https://shoujiki-panman.github.io",
+];
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  if (origin && ALLOWED_ORIGINS.includes(origin)) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+    res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  }
+  if (req.method === "OPTIONS") return res.sendStatus(204);
+  next();
+});
+
 app.use(express.static("public"));
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
@@ -186,4 +205,6 @@ app.post("/api/extract-fact", requireUser, async (req, res) => {
   }
 });
 
-app.listen(3000, () => console.log("起動 → http://localhost:3000"));
+// ローカルは3000、本番（Renderなど）はプラットフォームが渡すPORTを使う
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log("起動 → port " + PORT));
