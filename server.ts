@@ -221,6 +221,33 @@ app.post("/api/embed", requireUser, async (req, res) => {
   }
 });
 
+// 最新情報をWeb検索して答える窓口（OpenAI純正の web_search ツール。出典つき）
+// キーはサーバーだけが持つ。答え本文＋引用元(URL/タイトル)を返す。
+app.post("/api/websearch", requireUser, async (req, res) => {
+  const { input } = req.body;
+  try {
+    const r = await openai.responses.create({
+      model: "gpt-4.1-mini",                    // web_search対応・軽量
+      tools: [{ type: "web_search" }],
+      input: (input ?? "").slice(0, 4000),
+    });
+    // 出典（URL＋タイトル）を集める
+    const citations: { url: string; title: string }[] = [];
+    for (const item of (r.output ?? []) as any[]) {
+      if (item.type !== "message") continue;
+      for (const c of (item.content ?? []) as any[]) {
+        for (const a of (c.annotations ?? []) as any[]) {
+          if (a.type === "url_citation") citations.push({ url: a.url, title: a.title });
+        }
+      }
+    }
+    res.json({ text: r.output_text, citations });
+  } catch (err) {
+    console.error("web検索に失敗:", err);
+    res.status(500).json({ error: "web検索に失敗しました" });
+  }
+});
+
 // ローカルは3000、本番（Renderなど）はプラットフォームが渡すPORTを使う
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log("起動 → port " + PORT));
