@@ -49,6 +49,38 @@ const tools = [{
       required: ["a", "b", "op"],
     },
   },
+}, {
+  type: "function",
+  function: {
+    name: "get_timeline",
+    // ★第2章の実験: 説明書の文字だけで挙動が変わる
+    //   「データを取得する。」でも get_timeline という【名前】のおかげで呼ばれた
+    //   名前を fetch_data_2 に変えた瞬間、呼ばれなくなった（エラーは出ず、静かに聞き返すだけ）
+    //   → 道具の名前は「AIへの説明の1行目」。開発者都合の名前は道具を見えなくする
+    description: "ミニTwitterの公開タイムラインを新しい順に読む。「タイムラインを要約して」「最近どんな投稿がある？」「みんな何を話してる？」など、いま流れている投稿の中身を知る必要があるときに使う。",
+    parameters: {
+      type: "object",
+      properties: {
+        limit: { type: "number", description: "読む件数。1〜20。省略すると10件" },
+      },
+      required: [],   // limit は省略可。LLMが件数を指定しなくても呼べるようにする
+    },
+  },
+}, {
+  type: "function",
+  function: {
+    name: "propose_post",
+    // ★第4章: この道具は「投稿する」道具ではない。下書きを提案するだけ。
+    //   実際に投稿できるのはブラウザの確認ダイアログだけなので、名前も propose（提案）にしてある
+    description: "ミニTwitterへの投稿の下書きを、ユーザーに提案する。実際には投稿されず、ユーザーが画面で確認して初めて投稿される。投稿を頼まれたら、必ずこの道具を使って下書きを出すこと。文章をそのまま返信に書くのではなく、この道具を使う。",
+    parameters: {
+      type: "object",
+      properties: {
+        body: { type: "string", description: "投稿する本文。140字以内。" },
+      },
+      required: ["body"],
+    },
+  },
 }];
 
 // 道具の実体。引数は鵜呑みにせず検証してから使う（背骨②）
@@ -63,6 +95,23 @@ function calculate(a, b, op) {
   return "不明な演算です";
 }
 
+// 道具の実体②。公開ツイートを新しい順に読んで「返すだけ」（画面は触らない・DBには書かない）
+// DBを待つので async。calculate と違ってこちらは非同期
+async function getTimeline(limit) {
+  // 引数は鵜呑みにしない（背骨②）。LLMが 9999 と言ってきても 20 で頭打ち、変な値なら 10
+  const n = Math.min(Math.max(Number(limit) || 10, 1), 20);
+  const { data, error } = await supabase
+    .from("tweets")
+    .select("body, created_at")
+    .eq("is_public", true)                       // 公開のみ。下書き(is_public=false)は読まない
+    .order("created_at", { ascending: false })   // 新しいものが上
+    .limit(n);
+  if (error) return "タイムラインを読めませんでした: " + error.message;
+  if (!data.length) return "投稿がまだありません";
+  // 返り値は文字列。読むのはLLMなので、人間に読める形に整える
+  return data.map((t, i) => `${i + 1}. ${t.body}`).join("\n");
+}
+
 // ログインしている人だけ通す見張り役（ミドルウェア）
 async function requireUser(req, res, next) {
   const token = req.headers.authorization?.replace("Bearer ", "");
@@ -74,8 +123,23 @@ async function requireUser(req, res, next) {
   next();
 }
 
+// ★第3章: 計画モードのときだけ足す規範（Claude Code / Grok Build の Plan mode）
+const PLAN_PROMPT = `あなたはミニTwitterのエージェントです。
+いまは【計画モード】です。まだ実行はしません。
+ユーザーの依頼に対して、これから何をするかを短い箇条書きで示してください。
+
+書き方:
+計画:
+  1. （やること）
+  2. （やること）
+
+注意:
+- 3〜4項目以内。長く書かない
+- 投稿など取り消せない操作を含むときは、最後に「※実行前に確認します」と書く
+- 挨拶や前置きは不要。「計画:」から書き始める`;
+
 app.post("/api/chat", requireUser, async (req, res) => {
-  const { messages } = req.body;
+  const { messages, planOnly } = req.body;   // ★planOnly: true なら計画だけ返す
   const today = new Date().toISOString().slice(0, 10); // "2026-07-04"
 
   // 使いすぎチェックは「流し始める前」に（429はJSONで返す必要があるため）
@@ -91,7 +155,10 @@ app.post("/api/chat", requireUser, async (req, res) => {
   res.flushHeaders(); // ヘッダーをすぐ送り出す（ためこまない）
 
   let totalTokens = 0;
-  const convo = [...messages]; // 道具の結果を足していく作業用コピー
+  // 計画モードのときは、規範を先頭に足してから会話を渡す
+  const convo = planOnly
+    ? [{ role: "system", content: PLAN_PROMPT }, ...messages]
+    : [...messages]; // 道具の結果を足していく作業用コピー
 
   try {
     let usedTool = true;
@@ -105,6 +172,10 @@ app.post("/api/chat", requireUser, async (req, res) => {
         model: "gpt-4o-mini",
         messages: convo,
         tools,                                   // ★道具の説明書も渡す
+        // ★第3章の心臓: 計画モードでは道具を「呼べなくする」
+        //   プロンプトでお願いするだけでは、たまに従わない。取り消せない操作の前でそれは困る
+        //   tool_choice:"none" はモデル側で道具呼び出しを封じるので、規範ではなくコードで止まる
+        tool_choice: planOnly ? "none" : "auto",
         stream: true,
         stream_options: { include_usage: true },
       });
@@ -144,11 +215,38 @@ app.post("/api/chat", requireUser, async (req, res) => {
         // 道具を実際に実行して、結果を会話に足す
         for (const c of calls) {
           let result = "不明な道具です";
+          let summary = "";   // ★第6章: 画面に出す1行の要約（LLMに渡す result とは別物）
+          // 引数なしで呼ばれる道具は c.args が空文字で来ることがある → そのまま parse すると落ちる
+          const args = c.args ? JSON.parse(c.args) : {};
           if (c.name === "calculate") {
-            const args = JSON.parse(c.args);
             result = calculate(Number(args.a), Number(args.b), args.op);
+            summary = result;
+          } else if (c.name === "get_timeline") {
+            result = await getTimeline(args.limit);
+            summary = result.startsWith("タイムラインを読めません") || result.startsWith("投稿がまだ")
+              ? result
+              : result.split("\n").length + "件読みました";
+          } else if (c.name === "propose_post") {
+            // ★第4章の心臓: ここでは【DBに一切書かない】。下書きをブラウザへ渡すだけ
+            const draft = String(args.body ?? "").trim().slice(0, 140);
+            if (!draft) {
+              result = "下書きが空でした。本文を入れてもう一度提案してください。";
+              summary = result;
+            } else {
+              // 文字列ではなくオブジェクトを流す。ブラウザはこれを見て確認ダイアログを出す
+              res.write("data: " + JSON.stringify({ type: "draft", body: draft }) + "\n\n");
+              // LLMには「まだ投稿されていない」ことをはっきり伝える（勝手に完了報告させない）
+              result = "下書きをユーザーに提示しました。まだ投稿されていません。ユーザーが画面で確認するのを待っています。あなたからは投稿できません。";
+              summary = "下書きを提示しました（確認待ち）";
+            }
           }
-          res.write("data: " + JSON.stringify(`\n[道具 ${c.name} を実行 → ${result}]\n`) + "\n\n");
+          // ★第6章: Claude Code 風の2行に畳む。中身の全文ではなく「何をして、どうだったか」だけ出す
+          //   ⏺ get_timeline(limit: 10)
+          //     └ 9件読みました
+          const argStr = Object.entries(args)
+            .map(([k, v]) => `${k}: ${typeof v === "string" ? `"${v.length > 24 ? v.slice(0, 24) + "…" : v}"` : v}`)
+            .join(", ");
+          res.write("data: " + JSON.stringify(`\n⏺ ${c.name}(${argStr})\n  └ ${summary || result}\n`) + "\n\n");
           convo.push({ role: "tool", tool_call_id: c.id, content: result });
         }
         // ループ先頭に戻り、結果を踏まえた最終回答をまた流す
