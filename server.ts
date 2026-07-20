@@ -211,7 +211,7 @@ app.post("/api/chat", requireUser, async (req, res) => {
       usedTool = false;
 
       const stream = await openai.chat.completions.create({
-        model: "gpt-4o-mini",
+        model: "gpt-5-mini",   // 2026-07-20 gpt-4o-miniから変更。エージェントの判断力（調べるか・道具を使うか）を上げる
         messages: convo,
         tools,                                   // ★道具の説明書も渡す
         // ★第3章の心臓: 計画モードでは道具を「呼べなくする」
