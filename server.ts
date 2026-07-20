@@ -72,11 +72,11 @@ const tools = [{
     name: "propose_post",
     // ★第4章: この道具は「投稿する」道具ではない。下書きを提案するだけ。
     //   実際に投稿できるのはブラウザの確認ダイアログだけなので、名前も propose（提案）にしてある
-    description: "ミニTwitterへの投稿の下書きを、ユーザーに提案する。実際には投稿されず、ユーザーが画面で確認して初めて投稿される。投稿を頼まれたら、必ずこの道具を使って下書きを出すこと。文章をそのまま返信に書くのではなく、この道具を使う。",
+    description: "ミニTwitterへの投稿の下書きを、ユーザーに提案する。実際には投稿されず、ユーザーが画面で確認して初めて投稿される。投稿を頼まれたら、必ずこの道具を使って下書きを出すこと。文章をそのまま返信に書くのではなく、この道具を使う。ユーザーから修正の要望が来たら、修正した本文で改めてこの道具を呼び直すこと。",
     parameters: {
       type: "object",
       properties: {
-        body: { type: "string", description: "投稿する本文。140字以内。" },
+        body: { type: "string", description: "投稿する本文。280字以内。リンクを載せるときは実際のURLをそのまま書く（『URL』『リンクはこちら』のようなプレースホルダは禁止。実際のURLが分からなければリンクは載せない）。" },
       },
       required: ["body"],
     },
@@ -273,10 +273,14 @@ app.post("/api/chat", requireUser, async (req, res) => {
             summary = nCites ? `調べました（出典${nCites}件）` : "調べました";
           } else if (c.name === "propose_post") {
             // ★第4章の心臓: ここでは【DBに一切書かない】。下書きをブラウザへ渡すだけ
-            const draft = String(args.body ?? "").trim().slice(0, 140);
+            const draft = String(args.body ?? "").trim();
             if (!draft) {
               result = "下書きが空でした。本文を入れてもう一度提案してください。";
               summary = result;
+            } else if (draft.length > 280) {
+              // 黙って切るとURLが途中で壊れる。差し戻してLLMに縮めさせる
+              result = `本文が長すぎます（${draft.length}字）。280字以内に収めて、URLは末尾に置いて、もう一度この道具を呼んでください。`;
+              summary = `長すぎたため差し戻し（${draft.length}字）`;
             } else {
               // 文字列ではなくオブジェクトを流す。ブラウザはこれを見て確認ダイアログを出す
               res.write("data: " + JSON.stringify({ type: "draft", body: draft }) + "\n\n");
