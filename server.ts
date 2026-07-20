@@ -81,6 +81,19 @@ const tools = [{
       required: ["body"],
     },
   },
+}, {
+  type: "function",
+  function: {
+    name: "search_web",
+    description: "Webを検索して最新の情報を調べる。「〜について調べて」「最近の〜は？」「ニュースを踏まえて」など、タイムラインの外にある情報・最新の出来事・一般知識の確認が必要なときに使う。出典つきの答えが返る。",
+    parameters: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "調べたいこと。日本語でよい" },
+      },
+      required: ["query"],
+    },
+  },
 }];
 
 // 道具の実体。引数は鵜呑みにせず検証してから使う（背骨②）
@@ -112,6 +125,29 @@ async function getTimeline(limit) {
   return data.map((t, i) => `${i + 1}. ${t.body}`).join("\n");
 }
 
+// 道具の実体③。Webを検索して出典つきの答えを返すだけ（/api/websearch と同じ中身を共用）
+async function searchWeb(query) {
+  const q = String(query ?? "").trim().slice(0, 4000);
+  if (!q) return "検索語が空でした";
+  const r = await openai.responses.create({
+    model: "gpt-4.1-mini",                    // web_search対応・軽量
+    tools: [{ type: "web_search" }],
+    input: q,
+  });
+  // 出典（URL＋タイトル）も文字列に含めてLLMへ渡す（正直に情報源を見せる）
+  const cites: string[] = [];
+  for (const item of (r.output ?? []) as any[]) {
+    if (item.type !== "message") continue;
+    for (const c of (item.content ?? []) as any[]) {
+      for (const a of (c.annotations ?? []) as any[]) {
+        if (a.type === "url_citation") cites.push(`- ${a.title} (${a.url})`);
+      }
+    }
+  }
+  const uniq = [...new Set(cites)].slice(0, 5);
+  return (r.output_text || "(結果なし)") + (uniq.length ? "\n\n出典:\n" + uniq.join("\n") : "");
+}
+
 // ログインしている人だけ通す見張り役（ミドルウェア）
 async function requireUser(req, res, next) {
   const token = req.headers.authorization?.replace("Bearer ", "");
@@ -127,6 +163,11 @@ async function requireUser(req, res, next) {
 const PLAN_PROMPT = `あなたはミニTwitterのエージェントです。
 いまは【計画モード】です。まだ実行はしません。
 ユーザーの依頼に対して、これから何をするかを短い箇条書きで示してください。
+
+あなたが使える道具はこの3つだけです。持っていない道具をあてにした計画を立てないでください:
+- get_timeline: 公開タイムラインを読む
+- search_web: Webを検索して最新情報を調べる（出典つき）
+- propose_post: 投稿の下書きをユーザーに提案する（投稿するのはユーザー本人）
 
 書き方:
 計画:
@@ -226,6 +267,10 @@ app.post("/api/chat", requireUser, async (req, res) => {
             summary = result.startsWith("タイムラインを読めません") || result.startsWith("投稿がまだ")
               ? result
               : result.split("\n").length + "件読みました";
+          } else if (c.name === "search_web") {
+            result = await searchWeb(args.query);
+            const nCites = (result.match(/^- /gm) || []).length;
+            summary = nCites ? `調べました（出典${nCites}件）` : "調べました";
           } else if (c.name === "propose_post") {
             // ★第4章の心臓: ここでは【DBに一切書かない】。下書きをブラウザへ渡すだけ
             const draft = String(args.body ?? "").trim().slice(0, 140);
