@@ -76,7 +76,7 @@ const tools = [{
     parameters: {
       type: "object",
       properties: {
-        body: { type: "string", description: "投稿する本文。280字以内。リンクを載せるときは実際のURLをそのまま書く（『URL』『リンクはこちら』のようなプレースホルダは禁止。実際のURLが分からなければリンクは載せない）。" },
+        body: { type: "string", description: "投稿する本文。短めが良い（SNSの投稿なので2〜4文が目安）。プレーンテキストで書く（**太字**や箇条書きなどのマークダウン装飾は使わない。#ハッシュタグはOK）。リンクを載せるときは実際のURLをそのまま書く（『URL』『リンクはこちら』のようなプレースホルダは禁止。実際のURLが分からなければリンクは載せない）。" },
       },
       required: ["body"],
     },
@@ -85,7 +85,7 @@ const tools = [{
   type: "function",
   function: {
     name: "search_web",
-    description: "Webを検索して最新の情報を調べる。「〜について調べて」「最近の〜は？」「ニュースを踏まえて」など、タイムラインの外にある情報・最新の出来事・一般知識の確認が必要なときに使う。出典つきの答えが返る。",
+    description: "Webを検索して最新の情報を調べる。あなた自身の知識は2024年頃で止まっているので、知らない固有名詞（新しいモデル名・製品名など）や「最新」「今」を含む話題は、記憶で答えずに必ず先にこれで調べること。比較を頼まれたら、比較対象もこれで調べる。出典つきの答えが返る。",
     parameters: {
       type: "object",
       properties: {
@@ -204,8 +204,9 @@ app.post("/api/chat", requireUser, async (req, res) => {
   try {
     let usedTool = true;
     let guard = 0;
-    // 道具を呼ぶ→実行→また聞く、を最大3回まで（無限ループ防止＝背骨②）
-    while (usedTool && guard < 3) {
+    // 道具を呼ぶ→実行→また聞く、の上限（無限ループ防止＝背骨②）
+    // 3だと「検索2回→下書き」で使い切る。調べ物＋提案が1往復で収まるよう5に
+    while (usedTool && guard < 5) {
       guard++;
       usedTool = false;
 
@@ -277,9 +278,11 @@ app.post("/api/chat", requireUser, async (req, res) => {
             if (!draft) {
               result = "下書きが空でした。本文を入れてもう一度提案してください。";
               summary = result;
-            } else if (draft.length > 280) {
+            } else if (draft.length > 500) {
               // 黙って切るとURLが途中で壊れる。差し戻してLLMに縮めさせる
-              result = `本文が長すぎます（${draft.length}字）。280字以内に収めて、URLは末尾に置いて、もう一度この道具を呼んでください。`;
+              // 注: LLMは字数を数えられないので、細かい上限は差し戻し無限ループになる（280で実証済み）。
+              //     上限はゆるく取り、削り方は「量」ではなく「内容」で指示する
+              result = `本文が長すぎます（${draft.length}字）。話題を1〜2個に絞って、いまの半分の長さでもう一度この道具を呼んでください。URLは末尾に。`;
               summary = `長すぎたため差し戻し（${draft.length}字）`;
             } else {
               // 文字列ではなくオブジェクトを流す。ブラウザはこれを見て確認ダイアログを出す
